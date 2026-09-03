@@ -1,0 +1,25 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Superseded / corrupt data (remove these lines if you want them in the repo)
+known_faces/          # 3023 all-black corrupt images from the original dataset
+encodings.pkl         # old 128-d dlib encodings (InsightFace uses face_db.pkl)
+
+# Runtime-generated files
+face_db.pkl           # your registered faces (local data)
+attendance_*.csv      # exported attendance
+.claude/
