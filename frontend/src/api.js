@@ -24,4 +24,7 @@ export const api = {
   save: () => post("/api/save"),
   register: (id, name) => post("/api/register", { id, name }),
   dismiss: (id) => post("/api/dismiss", { id }),
+  aiStatus: () => json("/api/ai_status"),
+  ask: (question) => post("/api/ask", { question }),
+  report: () => json("/api/report"),
 };

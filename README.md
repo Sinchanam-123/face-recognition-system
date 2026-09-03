@@ -22,12 +22,50 @@ The project has two parts on top of the original notebooks:
 backend/          Flask API + recognition engine (Python)
   app.py            REST endpoints + MJPEG /video_feed stream
   engine.py         camera thread, face matching, attendance & unknown-face state
+  genai.py          generative-AI layer: NL Q&A + report over the records
   encode_faces.py   build face_db.pkl from a folder of real photos
   requirements.txt
 frontend/         React + Vite dashboard
-  src/App.jsx       live video, attendance table, register-unknown cards
+  src/App.jsx       live video, attendance table, register-unknown cards, Ask-AI panel
 face_db.pkl         saved 512-d face embeddings (created on first registration)
 ```
+
+### Generative-AI layer — "Ask AI" (Claude)
+
+On top of recognition (a *discriminative* task), the dashboard has an **Ask AI**
+panel that layers a *generative* capability over the attendance records:
+
+* **Chat with the data** — ask in plain English (*"who was marked uncertain?"*,
+  *"how many are present?"*) and get an answer computed from today's records.
+* **Daily report** — one click generates a short natural-language summary of
+  attendance, uncertain matches, and unknown faces still pending.
+
+`backend/genai.py` picks a provider **automatically**, in this order — no code
+changes needed to switch:
+
+1. **Claude** — if `ANTHROPIC_API_KEY` is set (uses `claude-haiku-4-5`, cheap/fast)
+2. **Ollama** — if a local [Ollama](https://ollama.com) server is running (free, offline)
+3. **Computed fallback** — deterministic answers, always available (nothing to install)
+
+So the panel works out of the box (computed fallback), lights up automatically
+when Ollama is running, and uses Claude if you add a key. This mirrors how the
+server boots even without the recognition packages.
+
+**Free local AI with Ollama (recommended, no API key/billing):**
+```bash
+# 1. install Ollama from https://ollama.com , then:
+ollama pull llama3.2         # small (~2 GB) model; override with OLLAMA_MODEL
+# 2. just start the backend — genai.py auto-detects the running server
+```
+
+**Or use Claude (needs an API key + billing credit):**
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."        # bash
+$env:ANTHROPIC_API_KEY = "sk-ant-..."        # Windows PowerShell
+```
+
+Env vars: `OLLAMA_MODEL` (default `llama3.2`), `OLLAMA_HOST` (default
+`http://localhost:11434`). The **Ask AI** panel shows which provider is active.
 
 ### Recognition engine — InsightFace (Python 3.14 native)
 
@@ -85,3 +123,6 @@ new people (their encoding is saved to `encodings.pkl` for next time).
 | GET    | `/api/pending`    | unknown faces awaiting a name            |
 | POST   | `/api/register`   | `{id, name}` → save a face permanently   |
 | GET    | `/api/download`   | download today's attendance CSV          |
+| GET    | `/api/ai_status`  | whether the LLM path is configured       |
+| POST   | `/api/ask`        | `{question}` → NL answer over the records|
+| GET    | `/api/report`     | AI-written daily attendance summary      |

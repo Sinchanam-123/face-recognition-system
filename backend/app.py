@@ -10,6 +10,7 @@ import os
 from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
+import genai
 from engine import PROJECT_ROOT, engine
 
 app = Flask(__name__)
@@ -69,6 +70,37 @@ def download():
     if not os.path.exists(path):
         return jsonify({"ok": False, "message": "No attendance to download."}), 404
     return send_from_directory(PROJECT_ROOT, filename, as_attachment=True)
+
+
+@app.post("/api/ask")
+def ask():
+    """Answer a natural-language question about today's attendance."""
+    body = request.get_json(silent=True) or {}
+    records = engine.attendance()
+    known = engine.status()["known_count"]
+    try:
+        text, source = genai.answer(body.get("question"), records, known)
+    except Exception as e:  # never let an API hiccup 500 the dashboard
+        return jsonify({"ok": False, "message": f"AI error: {e}"}), 502
+    return jsonify({"ok": True, "answer": text, "source": source})
+
+
+@app.get("/api/report")
+def report():
+    """Generate a short natural-language summary of today's attendance."""
+    records = engine.attendance()
+    st = engine.status()
+    try:
+        text, source = genai.report(records, st["known_count"], st["pending_count"])
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"AI error: {e}"}), 502
+    return jsonify({"ok": True, "report": text, "source": source})
+
+
+@app.get("/api/ai_status")
+def ai_status():
+    """Which AI provider is active: Claude, Ollama, or the computed fallback."""
+    return jsonify({"enabled": genai.is_enabled(), "provider": genai.provider_name()})
 
 
 @app.get("/video_feed")
