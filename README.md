@@ -27,6 +27,10 @@ backend/          Flask API + recognition engine (Python)
   requirements.txt
 frontend/         React + Vite dashboard
   src/App.jsx       live video, attendance table, register-unknown cards, Ask-AI panel
+legacy/           the original dlib notebooks, archived (see legacy/README.md)
+  attendance_system.ipynb
+  encode_faces.ipynb
+  download_dataset.ipynb
 face_db.pkl         saved 512-d face embeddings (created on first registration)
 ```
 
