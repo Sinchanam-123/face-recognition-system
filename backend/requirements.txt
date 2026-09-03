@@ -1,14 +1,40 @@
-# Web backend
-flask>=3.0
-flask-cors>=4.0
+# Target: CPython 3.11.
+# Every pin below was resolved against PyPI metadata for 3.11 (not from a
+# developer's local environment) and verified to co-resolve with
+#   pip install --python-version 3.11 --only-binary=:all: -r requirements.txt
+# Deliberately staying on the mature major lines (opencv 4.x, pandas 2.x)
+# rather than the newest releases, which are 5.x / 3.x.
 
-# Recognition stack — installs cleanly on Python 3.14 (no dlib needed)
-insightface>=0.7.3        # ArcFace detection + 512-d embeddings
-onnxruntime>=1.20         # runs the ONNX models on CPU
-opencv-python>=4.9        # webcam capture + drawing
-numpy
-pandas
-Pillow
+# Web backend
+flask==3.1.3
+flask-cors==6.0.5
+
+# Generative-AI layer (chat + report). Optional: the /api/ask and /api/report
+# endpoints fall back to computed summaries when ANTHROPIC_API_KEY is unset.
+#
+# The `anthropic` package is intentionally NOT pinned here. backend/genai.py
+# imports it lazily and guards the import with try/ImportError, so the Claude
+# path simply stays disabled when the package is absent and the app falls
+# through to Ollama or the computed fallback. Install it only if you want the
+# Claude provider:
+#     pip install anthropic
+
+# Recognition stack — installs cleanly on 3.11 (no dlib needed)
+insightface==1.0.1        # ArcFace detection + 512-d embeddings
+onnxruntime==1.29.0       # runs the ONNX models on CPU
+opencv-python==4.14.0.94  # webcam capture + drawing
+numpy==2.4.6
+pandas==2.3.3
+pillow==12.3.0
+
+# Build toolchain note:
+# insightface's source distribution compiles a Cython extension
+# (thirdparty/face3d/mesh/cython), so building it from sdist needs a C/C++
+# toolchain — MSVC Build Tools on Windows, build-essential on Debian/Ubuntu.
+# The pin above (1.0.1) publishes a pure-Python wheel (insightface-1.0.1-
+# py3-none-any.whl), so a normal `pip install` uses the wheel and needs no
+# compiler. You only need the toolchain if you force a source build
+# (--no-binary) or drop back to 0.7.3, which is sdist-only.
 
 # First time you start the camera, InsightFace downloads the 'buffalo_sc' model
 # pack (~15 MB) to ~/.insightface/models — this needs an internet connection once.

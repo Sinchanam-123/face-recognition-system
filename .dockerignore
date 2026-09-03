@@ -1,0 +1,42 @@
+# Forward-looking: there is no Dockerfile in this repo yet, so nothing reads
+# this file today. It is here so that the first image build starts from a small,
+# clean context instead of shipping the dataset and local state.
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Frontend build inputs/outputs (build in a separate stage, or serve the
+# prebuilt dist from the host)
+node_modules
+frontend/node_modules
+frontend/dist
+
+# Python bytecode / virtualenvs
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+
+# Local state and data — never bake these into an image
+*.pkl
+attendance_*.csv
+known_faces/
+
+# Archived dlib-era notebooks, not part of the running system
+legacy/
+*.ipynb
+.ipynb_checkpoints
+
+# Editor / tooling / OS
+.claude/
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docs
+CLAUDE.md
