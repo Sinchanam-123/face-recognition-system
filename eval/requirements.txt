@@ -1,0 +1,13 @@
+# Evaluation-only dependencies.
+#
+# These are NOT needed to run the app — install them on top of
+# backend/requirements.txt when you want to measure accuracy:
+#
+#     pip install -r backend/requirements.txt
+#     pip install -r eval/requirements.txt
+#
+# Pins resolved for CPython 3.11 and verified with
+#   pip install --python-version 3.11 --only-binary=:all: ...
+# They pull numpy 2.4.6, the same version backend/requirements.txt pins.
+scikit-learn==1.9.0   # fetch_lfw_people, roc_curve, auc
+matplotlib==3.11.1    # PNG plots (Agg backend, no display needed)

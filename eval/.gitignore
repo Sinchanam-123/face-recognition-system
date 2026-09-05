@@ -1,0 +1,8 @@
+# Cached embeddings (.npz, regenerable — keyed by model + dataset config).
+.cache/
+
+# Smoke-test scratch output.
+.smoke/
+
+# Byte-compiled artefacts.
+__pycache__/

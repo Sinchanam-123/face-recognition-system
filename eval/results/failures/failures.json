@@ -1,0 +1,256 @@
+{
+  "threshold": 0.3699702024459839,
+  "deploy_gallery_size": 50,
+  "note": "Every failure is listed here; the PNG grids show at most 48 per category, highest similarity first.",
+  "failures": {
+    "closed_set_rank1_errors": [
+      {
+        "probe_index": 3603,
+        "match_index": 3285,
+        "true_name": "Recep Tayyip Erdogan",
+        "pred_name": "Abdullah Gul",
+        "score": 0.5955091714859009,
+        "margin": 0.3695996105670929,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 2532,
+        "match_index": 784,
+        "true_name": "Donald Rumsfeld",
+        "pred_name": "Richard Myers",
+        "score": 0.3470439910888672,
+        "margin": 0.12607614696025848,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 1222,
+        "match_index": 3285,
+        "true_name": "Mahmoud Abbas",
+        "pred_name": "Abdullah Gul",
+        "score": 0.23735323548316956,
+        "margin": 0.08035068213939667,
+        "faces_in_probe_frame": 1
+      }
+    ],
+    "openset_false_accepts": [],
+    "openset_misidentifications": [],
+    "openset_false_rejects": [
+      {
+        "probe_index": 2382,
+        "match_index": 2094,
+        "true_name": "Winona Ryder",
+        "pred_name": "Winona Ryder",
+        "score": 0.36960750818252563,
+        "margin": 0.20300599932670593,
+        "faces_in_probe_frame": 2
+      },
+      {
+        "probe_index": 1847,
+        "match_index": 3320,
+        "true_name": "Keanu Reeves",
+        "pred_name": "Keanu Reeves",
+        "score": 0.3687187135219574,
+        "margin": 0.21654841303825378,
+        "faces_in_probe_frame": 2
+      },
+      {
+        "probe_index": 1769,
+        "match_index": 3913,
+        "true_name": "Carlos Moya",
+        "pred_name": "Carlos Moya",
+        "score": 0.3670462965965271,
+        "margin": 0.22223539650440216,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 2417,
+        "match_index": 1467,
+        "true_name": "Gloria Macapagal Arroyo",
+        "pred_name": "Gloria Macapagal Arroyo",
+        "score": 0.3622671365737915,
+        "margin": 0.2776176333427429,
+        "faces_in_probe_frame": 2
+      },
+      {
+        "probe_index": 1754,
+        "match_index": 3103,
+        "true_name": "Atal Bihari Vajpayee",
+        "pred_name": "Atal Bihari Vajpayee",
+        "score": 0.3619154691696167,
+        "margin": 0.21901020407676697,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 1320,
+        "match_index": 2094,
+        "true_name": "Winona Ryder",
+        "pred_name": "Winona Ryder",
+        "score": 0.36176395416259766,
+        "margin": 0.2560795545578003,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 1179,
+        "match_index": 1935,
+        "true_name": "Nancy Pelosi",
+        "pred_name": "Nancy Pelosi",
+        "score": 0.35795021057128906,
+        "margin": 0.23345467448234558,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 2695,
+        "match_index": 3093,
+        "true_name": "Tony Blair",
+        "pred_name": "Tony Blair",
+        "score": 0.35696470737457275,
+        "margin": 0.18472355604171753,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 3129,
+        "match_index": 2853,
+        "true_name": "Tiger Woods",
+        "pred_name": "Tiger Woods",
+        "score": 0.3566138744354248,
+        "margin": 0.21481280028820038,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 1096,
+        "match_index": 1041,
+        "true_name": "Mohammad Khatami",
+        "pred_name": "Mohammad Khatami",
+        "score": 0.35522329807281494,
+        "margin": 0.16967090964317322,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 3692,
+        "match_index": 3913,
+        "true_name": "Carlos Moya",
+        "pred_name": "Carlos Moya",
+        "score": 0.3551451861858368,
+        "margin": 0.1983078420162201,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 3605,
+        "match_index": 3103,
+        "true_name": "Atal Bihari Vajpayee",
+        "pred_name": "Atal Bihari Vajpayee",
+        "score": 0.35461756587028503,
+        "margin": 0.19710445404052734,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 2923,
+        "match_index": 2094,
+        "true_name": "Winona Ryder",
+        "pred_name": "Winona Ryder",
+        "score": 0.3527218997478485,
+        "margin": 0.2208119034767151,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 170,
+        "match_index": 2853,
+        "true_name": "Tiger Woods",
+        "pred_name": "Tiger Woods",
+        "score": 0.3455347418785095,
+        "margin": 0.17913256585597992,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 1719,
+        "match_index": 1467,
+        "true_name": "Gloria Macapagal Arroyo",
+        "pred_name": "Gloria Macapagal Arroyo",
+        "score": 0.3428623080253601,
+        "margin": 0.19264186918735504,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 1276,
+        "match_index": 3305,
+        "true_name": "Jennifer Capriati",
+        "pred_name": "Jennifer Capriati",
+        "score": 0.3339097499847412,
+        "margin": 0.20218369364738464,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 3053,
+        "match_index": 2094,
+        "true_name": "Winona Ryder",
+        "pred_name": "Winona Ryder",
+        "score": 0.3337794542312622,
+        "margin": 0.17826706171035767,
+        "faces_in_probe_frame": 2
+      },
+      {
+        "probe_index": 64,
+        "match_index": 2180,
+        "true_name": "David Beckham",
+        "pred_name": "David Beckham",
+        "score": 0.3146997094154358,
+        "margin": 0.1995164155960083,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 3308,
+        "match_index": 2853,
+        "true_name": "Tiger Woods",
+        "pred_name": "Tiger Woods",
+        "score": 0.30705583095550537,
+        "margin": 0.17558553814888,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 242,
+        "match_index": 2094,
+        "true_name": "Winona Ryder",
+        "pred_name": "Winona Ryder",
+        "score": 0.3048222064971924,
+        "margin": 0.17649458348751068,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 2877,
+        "match_index": 2586,
+        "true_name": "Britney Spears",
+        "pred_name": "Britney Spears",
+        "score": 0.2991564869880676,
+        "margin": 0.11040385067462921,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 3092,
+        "match_index": 3103,
+        "true_name": "Atal Bihari Vajpayee",
+        "pred_name": "Atal Bihari Vajpayee",
+        "score": 0.2870873808860779,
+        "margin": 0.12626008689403534,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 3617,
+        "match_index": 1612,
+        "true_name": "Saddam Hussein",
+        "pred_name": "Saddam Hussein",
+        "score": 0.23624196648597717,
+        "margin": 0.09871892631053925,
+        "faces_in_probe_frame": 1
+      },
+      {
+        "probe_index": 39,
+        "match_index": 3305,
+        "true_name": "Jennifer Capriati",
+        "pred_name": "Jennifer Capriati",
+        "score": 0.2182472050189972,
+        "margin": 0.09176507592201233,
+        "faces_in_probe_frame": 1
+      }
+    ]
+  }
+}
