@@ -23,16 +23,84 @@ backend/          Flask API + recognition engine (Python)
   app.py            REST endpoints + MJPEG /video_feed stream
   engine.py         camera thread, face matching, attendance & unknown-face state
   genai.py          generative-AI layer: NL Q&A + report over the records
-  encode_faces.py   build face_db.pkl from a folder of real photos
+  models.py         SQLAlchemy schema: person, face_template, attendance,
+                    user, audit_log
+  db.py             engine/session factory (WAL, foreign keys, busy timeout)
+  repo.py           every SQL statement the app runs
+  security.py       password hashing, JWTs, role gates, default-deny hook
+  settings.py       environment-driven config (JWT, database, CORS, limits)
+  cli.py            admin CLI: create-admin, create-user, list-users
+  migrate_pickle.py one-off face_db.pkl -> database import
+  migrations/       Alembic revisions
+  encode_faces.py   bulk-enrol from dataset/<Person>/*.jpg into the database
   requirements.txt
 frontend/         React + Vite dashboard
   src/App.jsx       live video, attendance table, register-unknown cards, Ask-AI panel
+  src/Login.jsx     sign-in screen
+  src/auth.js       token storage and session state
 legacy/           the original dlib notebooks, archived (see legacy/README.md)
   attendance_system.ipynb
   encode_faces.ipynb
   download_dataset.ipynb
-face_db.pkl         saved 512-d face embeddings (created on first registration)
+alembic.ini       migration config (URL comes from DATABASE_URL, not this file)
+.env.example      every setting, with the secrets left blank
+attendance.db     SQLite: gallery, attendance, users, audit log (gitignored)
+face_db.pkl       LEGACY gallery, kept as a backup; no longer read by the app
 ```
+
+### Persistence and authentication
+
+Attendance and the face gallery live in **SQLite via SQLAlchemy**, with Alembic
+owning the schema. Two problems drove that:
+
+* **Attendance used to be an in-memory dict keyed by name.** It was lost on
+  every restart, and it had no notion of a day — running past midnight marked
+  nobody on day two, silently, because yesterday's names were still in the dict.
+  `UNIQUE (person_id, date, session)` makes rollover structural rather than
+  something that has to be remembered.
+* **The gallery used to be a pickle** holding one embedding per name. It could
+  not express "these vectors are the same person", which the planned enrolment
+  augmentation needs, and `pickle.load` on a file path is arbitrary code
+  execution. `person` and `face_template` split identity from evidence.
+
+The API requires a **JWT** on every endpoint, with two roles — `admin` (enrol,
+delete, export, drive the camera) and `viewer` (read attendance). A
+`before_request` hook refuses to serve any endpoint that does not declare an
+access level, so a route added without a decorator fails closed instead of
+being exposed.
+
+**First run:**
+
+```bash
+py -m pip install -r backend/requirements.txt
+```
+
+```bash
+cp .env.example .env
+```
+
+Then put a signing key in `.env` — there is no default, and the server refuses
+to start without one:
+
+```bash
+py -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+```bash
+py -m alembic upgrade head
+```
+
+```bash
+py backend/migrate_pickle.py
+```
+
+```bash
+py backend/cli.py create-admin
+```
+
+`migrate_pickle.py` is idempotent and leaves `face_db.pkl` on disk untouched as
+a backup. `create-admin` prompts for a password; no default credentials are
+ever seeded.
 
 ### Generative-AI layer — "Ask AI" (Claude)
 
@@ -78,7 +146,10 @@ wheel for Python 3.14**, so it can't run on this machine. The backend instead
 uses **InsightFace (ArcFace)** on `onnxruntime`, which installs cleanly on 3.14,
 is more accurate, and bundles detection + recognition. It produces 512-d
 L2-normalized embeddings, so identity matching is a cosine similarity (dot
-product); thresholds are `0.50` (confident, green) / `0.32` (uncertain, orange).
+product); thresholds are **`0.370`** (confident, green — records attendance) and
+`0.32` (uncertain, orange — **displayed only, never recorded**). Both are
+measured, not guessed: see `backend/config.py` for the evaluation run behind
+each, and `eval/README.md` for how they were derived.
 
 The webcam runs **server-side** in a background thread and streams annotated
 frames to the browser as MJPEG. Unknown faces are queued as cards in the UI and
@@ -86,19 +157,27 @@ named with a click — replacing the notebook's blocking `input()`.
 
 > Note: the old `known_faces/` images are empty/black files (the original
 > notebook encoded from the sklearn LFW cache, not that folder), and 128-d dlib
-> vectors aren't compatible with ArcFace — so the app starts with an empty
-> `face_db.pkl` and is populated by registering faces live (or via
-> `encode_faces.py` on a folder of real photos).
+> vectors aren't compatible with ArcFace — so the gallery starts essentially
+> empty and is populated by registering faces live (or via `encode_faces.py` on
+> a folder of real photos). Both `migrate_pickle.py` and `encode_faces.py`
+> refuse 128-d vectors and undetectable images rather than importing junk.
 
 ## Running it
 
-**1. Backend** (Python 3.14 — the stack you have):
+**1. Backend** (Python 3.14 — the stack you have). Run from the **project root**
+so `PROJECT_ROOT` resolves and the database lands beside the source:
 
 ```bash
-cd backend
-pip install -r requirements.txt
-python app.py            # serves http://localhost:5000
+py -m pip install -r backend/requirements.txt
 ```
+
+```bash
+py backend/app.py
+```
+
+Serves `http://localhost:5000`. See **Persistence and authentication** above for
+the one-time `.env`, `alembic upgrade head` and `create-admin` steps — the
+server refuses to start until `JWT_SECRET` is set.
 
 First camera start downloads the InsightFace `buffalo_sc` model (~15 MB) once.
 The server boots even without the recognition packages installed — the
@@ -107,26 +186,86 @@ dashboard loads and shows a warning; only *starting the camera* needs them.
 **2. Frontend** (needs Node.js):
 
 ```bash
-cd frontend
-npm install
-npm run dev              # serves http://localhost:5173  (proxies /api to :5000)
+cd frontend && npm install
 ```
 
-Open **http://localhost:5173**, click **Start camera**, and attendance is marked
-live. Use **Download CSV** to export, and the **Unknown faces** panel to register
-new people (their encoding is saved to `encodings.pkl` for next time).
+```bash
+cd frontend && npm run dev
+```
+
+Open **http://localhost:5173** and sign in. An admin can click **Start camera**,
+export with **Download CSV**, and name people from the **Unknown faces** panel;
+a viewer sees the attendance table and the AI panel only.
+
+**3. Tests:**
+
+```bash
+py -m unittest discover -s backend -p "test_*.py"
+```
+
+### Bulk enrolment from photos
+
+To enrol a folder of `dataset/<Person>/*.jpg` rather than one webcam frame at a
+time. Preview first — it writes to the live database:
+
+```bash
+py backend/encode_faces.py path/to/dataset --dry-run
+```
+
+A dataset normally holds several photos per person, which gives each of them
+several face templates and invalidates `STRONG_MATCH = 0.370` (see the note
+below). So the script **refuses by default** and names both ways forward:
+
+```bash
+py backend/encode_faces.py path/to/dataset --one-per-person
+```
+
+`--one-per-person` enrols only the clearest photo of each person, keeping one
+template each so the threshold stays calibrated. `--allow-multi-template`
+enrols everything and accepts a stale threshold until it is re-derived. Both
+are idempotent, both write audit-log entries, and neither touches
+`face_db.pkl`.
 
 ### API
 
-| Method | Endpoint          | Purpose                                  |
-|--------|-------------------|------------------------------------------|
-| GET    | `/api/status`     | camera / deps / counts                   |
-| POST   | `/api/start`,`/api/stop` | control the camera thread         |
-| GET    | `/video_feed`     | MJPEG stream of the annotated webcam     |
-| GET    | `/api/attendance` | marked-attendance records (JSON)         |
-| GET    | `/api/pending`    | unknown faces awaiting a name            |
-| POST   | `/api/register`   | `{id, name}` → save a face permanently   |
-| GET    | `/api/download`   | download today's attendance CSV          |
-| GET    | `/api/ai_status`  | whether the LLM path is configured       |
-| POST   | `/api/ask`        | `{question}` → NL answer over the records|
-| GET    | `/api/report`     | AI-written daily attendance summary      |
+Every endpoint except `/` and `/api/auth/login` requires
+`Authorization: Bearer <token>`. **Role** is the minimum needed.
+
+| Method | Endpoint | Role | Purpose |
+|---|---|---|---|
+| GET | `/` | — | health check |
+| POST | `/api/auth/login` | — | `{username, password}` → JWT. Rate limited. |
+| GET | `/api/auth/me` | any | the token's user and role |
+| POST | `/api/auth/users` | admin | create another account |
+| GET | `/api/status` | viewer | camera / deps / counts / calibration warning |
+| POST | `/api/start`,`/api/stop` | admin | control the camera thread |
+| GET | `/video_feed` | *stream token* | MJPEG stream of the annotated webcam |
+| POST | `/api/stream_token` | viewer | single-use 60 s token for `/video_feed` |
+| GET | `/api/attendance` | viewer | today's records (JSON) |
+| GET | `/api/people` | viewer | enrolled people and their template counts |
+| DELETE | `/api/people/<id>` | admin | soft-delete; attendance history is kept |
+| GET | `/api/pending` | admin | unknown faces awaiting a name |
+| POST | `/api/register` | admin | `{id, name}` → enrol. Rate limited, audited. |
+| POST | `/api/dismiss` | admin | `{id}` → drop a pending face |
+| POST | `/api/save` | admin | write today's CSV |
+| GET | `/api/download` | admin | download today's attendance CSV |
+| GET | `/api/audit` | admin | recent audit-log entries |
+| GET | `/api/ai_status` | viewer | whether the LLM path is configured |
+| POST | `/api/ask` | viewer | `{question}` → NL answer over the records |
+| GET | `/api/report` | viewer | AI-written daily attendance summary |
+
+`/video_feed` is authenticated by a **single-use, 60-second, feed-only** token in
+the query string, because an `<img>` cannot send an `Authorization` header. It
+is not usable on any other endpoint. See `backend/app.py::stream_token` — the
+mechanism should be deleted along with `/video_feed` if browser-side capture
+over a WebSocket replaces it.
+
+### A note on the match threshold
+
+`STRONG_MATCH = 0.370` was measured at **one face template per person** (see
+`eval/README.md`). Open-set false-accept rate scales with the *total* number of
+templates, not the number of people, so enrolling a second template for anyone
+invalidates it — the evaluation measured N=5 needing 0.412. The app does not
+change the threshold on its own: it raises a persistent banner in the dashboard,
+flags the affected attendance rows (`multi_template_match`, carried into the CSV
+export), and leaves re-deriving the number to `eval/evaluate.py`.
