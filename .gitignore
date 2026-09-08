@@ -24,9 +24,30 @@ known_faces/
 encodings.pkl
 
 # Runtime-generated files.
-# face_db.pkl is your registered faces (local data).
+# face_db.pkl is the LEGACY registered-faces gallery. No longer read by the app
+# (see backend/migrate_pickle.py); kept on disk as a backup.
 face_db.pkl
 # attendance_*.csv is exported attendance, and may contain real names (PII).
 attendance_*.csv
+# attendance.db holds face embeddings, attendance records and password hashes.
+# Biometric data and credentials: never commit it.
+attendance.db
+attendance.db-wal
+attendance.db-shm
+
+# Liveness test set. REAL BIOMETRIC DATA — photographs of identifiable people,
+# plus deliberate spoof artefacts made from their faces. It never leaves this
+# machine and it is never committed. Captured by the operator, documented in
+# eval/liveness/README.md, and required by eval/liveness/evaluate.py.
+#
+# The rule below is comment-free on purpose: git only treats '#' as a comment at
+# the START of a line, so an inline comment would become part of the pattern.
+eval/liveness/dataset/
+# Measured output. Derived from that dataset and small, but it quotes filenames
+# of real people's captures, so it stays local too.
+eval/liveness/results/
+
+# Secrets. JWT_SECRET lives here; .env.example is the tracked template.
+.env
 
 .claude/
