@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api";
+import { api, downloadCsv } from "./api";
+import { clearSession, getSession, isAdmin, subscribe } from "./auth";
+import Login from "./Login";
 
 // Map a raw status string to a visual tone class (present / uncertain / default).
 function statusTone(status) {
@@ -16,10 +18,32 @@ function initials(name) {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
+// "2026-09-06T09:30:15" -> "09:30:15". Times arrive as ISO strings now that
+// check_in and check_out are real timestamps rather than a preformatted field.
+function clock(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleTimeString();
+}
+
 export default function App() {
+  const [session, setSessionState] = useState(getSession);
+
+  // Re-render on sign-in, sign-out, and on the 401 that api.js turns into a
+  // cleared session when a token expires mid-poll.
+  useEffect(() => subscribe(setSessionState), []);
+
+  if (!session?.token) return <Login />;
+  return <Dashboard session={session} />;
+}
+
+function Dashboard({ session }) {
+  const admin = isAdmin(session.user);
+
   const [status, setStatus] = useState(null);
   const [attendance, setAttendance] = useState([]);
   const [pending, setPending] = useState([]);
+  const [flagged, setFlagged] = useState([]);
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
   const [ai, setAi] = useState(null);
@@ -32,19 +56,29 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, a, p] = await Promise.all([
+      // A viewer is not permitted to see the unknown-face queue — it is cropped
+      // photographs of people who have not been enrolled — so only an admin
+      // asks for it.
+      // Flagged spoof attempts are admin-only for the same reason as the
+      // unknown queue, and more so: the payload is unconsented imagery attached
+      // to an accusation.
+      const [s, a, p, f] = await Promise.all([
         api.status(),
         api.attendance(),
-        api.pending(),
+        admin ? api.pending() : Promise.resolve([]),
+        admin ? api.flagged() : Promise.resolve([]),
       ]);
       setStatus(s);
       setAttendance(a);
       setPending(p);
+      setFlagged(f);
     } catch (e) {
-      // Backend probably not running yet — keep quiet, just mark offline.
+      // A 401 has already cleared the session, and App will swap to the login
+      // screen on the next render. Anything else is probably the backend being
+      // down — stay quiet and mark offline.
       setStatus((prev) => ({ ...(prev || {}), offline: true }));
     }
-  }, []);
+  }, [admin]);
 
   useEffect(() => {
     refresh();
@@ -59,6 +93,23 @@ export default function App() {
       .catch(() => setAi({ enabled: false, provider: "fallback" }));
   }, []);
 
+  // The MJPEG <img> cannot send an Authorization header, so each connection
+  // needs a fresh single-use token in the URL. Re-armed whenever the stream is
+  // (re)started, because a token is consumed the moment the stream connects.
+  const armStream = useCallback(async () => {
+    if (!imgRef.current) return;
+    try {
+      const { token } = await api.streamToken();
+      imgRef.current.src = `/video_feed?token=${encodeURIComponent(token)}`;
+    } catch (e) {
+      flash(`Could not open the video stream: ${e.message}`, "err");
+    }
+  }, []);
+
+  useEffect(() => {
+    armStream();
+  }, [armStream]);
+
   const running = status?.running;
 
   const toggleCamera = async () => {
@@ -66,10 +117,7 @@ export default function App() {
     try {
       const res = running ? await api.stop() : await api.start();
       flash(res.message, res.ok ? "ok" : "err");
-      // Bust the <img> cache so the MJPEG stream reconnects.
-      if (imgRef.current) {
-        imgRef.current.src = `/video_feed?t=${Date.now()}`;
-      }
+      await armStream();
     } catch (e) {
       flash(e.message, "err");
     } finally {
@@ -89,12 +137,29 @@ export default function App() {
   };
 
   const dismiss = async (id) => {
-    await api.dismiss(id);
+    try {
+      await api.dismiss(id);
+    } catch (e) {
+      flash(e.message, "err");
+    }
     refresh();
   };
 
-  const download = () => {
-    window.open("/api/download", "_blank");
+  const dismissFlagged = async (id) => {
+    try {
+      await api.dismissFlagged(id);
+    } catch (e) {
+      flash(e.message, "err");
+    }
+    refresh();
+  };
+
+  const download = async () => {
+    try {
+      await downloadCsv();
+    } catch (e) {
+      flash(e.message, "err");
+    }
   };
 
   return (
@@ -107,8 +172,27 @@ export default function App() {
             <span className="brand-sub">Real-time recognition</span>
           </div>
         </div>
-        <StatusPill status={status} />
+        <div className="topbar-right">
+          <StatusPill status={status} />
+          <span className={`role-tag role-${session.user?.role || "unknown"}`}>
+            {session.user?.username} · {session.user?.role}
+          </span>
+          <button className="btn ghost small" onClick={clearSession}>
+            Sign out
+          </button>
+        </div>
       </header>
+
+      {/* The threshold banner. Persistent, not a toast: STRONG_MATCH = 0.370
+          was measured at one template per person, and the moment anyone has two
+          the deployed threshold is no longer the one that was calibrated. This
+          has to stay on screen until it is re-derived. */}
+      {status?.calibration_warning && (
+        <div className="banner calib">
+          <strong>⚠ Match threshold is no longer calibrated.</strong>{" "}
+          {status.calibration_warning}
+        </div>
+      )}
 
       {status && !status.deps_ok && !status.offline && (
         <div className="banner warn">
@@ -124,15 +208,49 @@ export default function App() {
       )}
 
       <section className="kpis">
-        <Kpi label="Known faces" value={status?.known_count ?? "—"} icon="users" />
-        <Kpi label="Marked today" value={attendance.length} icon="check" tone="present" />
+        <Kpi label="Known faces" value={status?.identity_count ?? "—"} icon="users" />
         <Kpi
-          label="Unknown waiting"
-          value={pending.length}
-          icon="alert"
-          tone={pending.length ? "unknown" : "muted"}
-          alert={pending.length > 0}
+          label="Face templates"
+          value={status?.template_count ?? "—"}
+          icon="users"
+          tone={
+            status && status.template_count > status.identity_count
+              ? "unknown"
+              : "muted"
+          }
         />
+        <Kpi label="Marked today" value={attendance.length} icon="check" tone="present" />
+        {admin && (
+          <Kpi
+            label="Unknown waiting"
+            value={pending.length}
+            icon="alert"
+            tone={pending.length ? "unknown" : "muted"}
+            alert={pending.length > 0}
+          />
+        )}
+        {admin && (
+          // "Off" rather than 0 when no provider is configured. A zero would
+          // read as "no spoof attempts today", which is the opposite of the
+          // truth: nothing is being checked at all.
+          <Kpi
+            label="Spoofs blocked"
+            value={
+              status?.liveness?.active
+                ? status.liveness.counts?.failed ?? 0
+                : "off"
+            }
+            icon="alert"
+            tone={
+              !status?.liveness?.active
+                ? "muted"
+                : status.liveness.counts?.failed
+                  ? "unknown"
+                  : "present"
+            }
+            alert={Boolean(status?.liveness?.active && flagged.length)}
+          />
+        )}
       </section>
 
       <main className="grid">
@@ -140,19 +258,22 @@ export default function App() {
           <div className="panel-head">
             <h2><span className="head-ic video"><Icon name="camera" /></span>Live camera</h2>
             <div className="actions">
-              <button
-                className={running ? "btn danger" : "btn primary"}
-                onClick={toggleCamera}
-                disabled={busy}
-              >
-                {busy ? "…" : running ? "Stop camera" : "Start camera"}
-              </button>
+              {admin ? (
+                <button
+                  className={running ? "btn danger" : "btn primary"}
+                  onClick={toggleCamera}
+                  disabled={busy}
+                >
+                  {busy ? "…" : running ? "Stop camera" : "Start camera"}
+                </button>
+              ) : (
+                <span className="muted small">View only</span>
+              )}
             </div>
           </div>
           <div className={`video-wrap ${running ? "live" : ""}`}>
             <img
               ref={imgRef}
-              src="/video_feed"
               alt="Live feed"
               onError={(e) => {
                 e.currentTarget.classList.add("broken");
@@ -172,9 +293,11 @@ export default function App() {
                   <Icon name="camera" />
                 </div>
                 <span className="video-overlay-text">Camera is off</span>
-                <button className="btn primary" onClick={toggleCamera} disabled={busy}>
-                  {busy ? "…" : "Start camera"}
-                </button>
+                {admin && (
+                  <button className="btn primary" onClick={toggleCamera} disabled={busy}>
+                    {busy ? "…" : "Start camera"}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -189,9 +312,11 @@ export default function App() {
               {attendance.length > 0 && <span className="count-badge">{attendance.length}</span>}
             </h2>
             <div className="actions">
-              <button className="btn ghost" onClick={download} disabled={!attendance.length}>
-                Download CSV
-              </button>
+              {admin && (
+                <button className="btn ghost" onClick={download} disabled={!attendance.length}>
+                  Download CSV
+                </button>
+              )}
             </div>
           </div>
           {attendance.length === 0 ? (
@@ -202,21 +327,39 @@ export default function App() {
                 <tr>
                   <th>Name</th>
                   <th>Status</th>
-                  <th>Time</th>
+                  <th>Check in</th>
+                  <th>Check out</th>
                   <th>Date</th>
                 </tr>
               </thead>
               <tbody>
                 {attendance.map((r) => (
-                  <tr key={r.name}>
+                  <tr key={`${r.person_id}-${r.session}`}>
                     <td className="name">
                       <span className="cell-person">
                         <Avatar name={r.name} status={r.status} />
                         {r.name}
+                        {/* This record was written while the matched person had
+                            more than one template, i.e. under a threshold that
+                            is no longer the one the evaluation calibrated. */}
+                        {r.multi_template_match && (
+                          <span
+                            className="uncal-flag"
+                            title={
+                              "Matched against a person with multiple face " +
+                              "templates. STRONG_MATCH = 0.370 was derived at " +
+                              "one template per person, so this record was " +
+                              "written under an uncalibrated threshold."
+                            }
+                          >
+                            uncal
+                          </span>
+                        )}
                       </span>
                     </td>
                     <td><StatusTag status={r.status} /></td>
-                    <td className="mono-cell">{r.time}</td>
+                    <td className="mono-cell">{clock(r.check_in)}</td>
+                    <td className="mono-cell">{clock(r.check_out)}</td>
                     <td className="mono-cell">{r.date}</td>
                   </tr>
                 ))}
@@ -225,26 +368,61 @@ export default function App() {
           )}
         </section>
 
-        <section className="panel pending-panel">
-          <div className="panel-head">
-            <h2><span className="head-ic unknown"><Icon name="alert" /></span>Unknown faces</h2>
-            <span className="muted">{pending.length} waiting</span>
-          </div>
-          {pending.length === 0 ? (
-            <Empty text="No unknown faces. New people appear here to be named." />
-          ) : (
-            <div className="cards">
-              {pending.map((p) => (
-                <UnknownCard
-                  key={p.id}
-                  person={p}
-                  onRegister={register}
-                  onDismiss={dismiss}
-                />
-              ))}
+        {admin && (
+          <section className="panel pending-panel">
+            <div className="panel-head">
+              <h2><span className="head-ic unknown"><Icon name="alert" /></span>Unknown faces</h2>
+              <span className="muted">{pending.length} waiting</span>
             </div>
-          )}
-        </section>
+            {pending.length === 0 ? (
+              <Empty text="No unknown faces. New people appear here to be named." />
+            ) : (
+              <div className="cards">
+                {pending.map((p) => (
+                  <UnknownCard
+                    key={p.id}
+                    person={p}
+                    onRegister={register}
+                    onDismiss={dismiss}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Spoof attempts. A separate panel from "Unknown faces" on purpose:
+            an unknown face is somebody the system has not met, and this is
+            somebody it believes tried to claim another person's attendance.
+            Merging them would bury the second in the first. */}
+        {admin && (
+          <section className="panel flagged-panel">
+            <div className="panel-head">
+              <h2>
+                <span className="head-ic spoof"><Icon name="alert" /></span>
+                Flagged attempts
+              </h2>
+              <span className="muted">{flagged.length} flagged</span>
+            </div>
+            {!status?.liveness?.active ? (
+              <Empty
+                text={
+                  "Anti-spoofing is OFF — no liveness check runs, so a photo " +
+                  "held up to the camera is marked present. " +
+                  (status?.liveness?.reason || "")
+                }
+              />
+            ) : flagged.length === 0 ? (
+              <Empty text="No spoof attempts detected. Faces that fail the liveness check appear here and are never marked present." />
+            ) : (
+              <div className="cards">
+                {flagged.map((f) => (
+                  <FlaggedCard key={f.id} attempt={f} onDismiss={dismissFlagged} />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         <AiPanel ai={ai} hasData={attendance.length > 0} onError={(m) => flash(m, "err")} />
       </main>
@@ -347,6 +525,66 @@ function AiPanel({ ai, hasData, onError }) {
   );
 }
 
+// How each attack label reads to an operator. The raw enum values are the
+// model's vocabulary, not a person's.
+const ATTACK_LABELS = {
+  printed_photo: "Printed photo",
+  screen_replay: "Screen replay",
+  mask: "Mask",
+  unclear: "Could not tell",
+  none: "No attack named",
+};
+
+function FlaggedCard({ attempt, onDismiss }) {
+  // 'error' means the check could not decide, not that an attack was seen. It
+  // still refused the mark (fail closed), and the card says which of the two
+  // happened, because "we caught a spoof" and "we could not tell" warrant very
+  // different responses from the operator.
+  const inconclusive = attempt.state === "error";
+  const pct = Math.round((Number(attempt.confidence) || 0) * 100);
+
+  return (
+    <div className={`card flagged ${inconclusive ? "inconclusive" : ""}`}>
+      <div className="thumb-wrap">
+        {attempt.thumb ? (
+          <img
+            src={`data:image/jpeg;base64,${attempt.thumb}`}
+            alt="Face refused by the liveness check"
+          />
+        ) : (
+          <div className="thumb-fallback">!</div>
+        )}
+        <span className="spoof-badge" title={`Confidence ${pct}%`}>
+          {inconclusive ? "?" : `${pct}%`}
+        </span>
+      </div>
+      <div className="card-body">
+        <div className="flagged-title">
+          {inconclusive ? "Liveness inconclusive" : "Presentation attack"}
+        </div>
+        <div className="flagged-attack">
+          {ATTACK_LABELS[attempt.attack_type] || attempt.attack_type}
+        </div>
+        {attempt.name && (
+          <div className="flagged-claim">
+            Claimed as <strong>{attempt.name}</strong> — not marked present
+          </div>
+        )}
+        {attempt.reasoning && (
+          <div className="flagged-reason" title={attempt.reasoning}>
+            {attempt.reasoning}
+          </div>
+        )}
+        <div className="card-actions">
+          <button className="btn ghost small" onClick={() => onDismiss(attempt.id)}>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UnknownCard({ person, onRegister, onDismiss }) {
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -399,6 +637,12 @@ function UnknownCard({ person, onRegister, onDismiss }) {
           onKeyDown={(e) => e.key === "Enter" && name.trim() && doSave()}
           disabled={saving}
         />
+        {/* Typing an existing name attaches another template to that person
+            rather than creating a duplicate — and that is what invalidates the
+            threshold, so say so before the click rather than after. */}
+        <p className="card-note">
+          An existing name adds another face template to that person.
+        </p>
         <div className="card-actions">
           <button
             className="btn primary small"

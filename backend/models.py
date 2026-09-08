@@ -53,6 +53,25 @@ SOURCE_ENROLMENT = "enrolment"   # a real captured frame an operator named
 SOURCE_AUGMENTED = "augmented"   # synthesised from an enrolment template
 TEMPLATE_SOURCES = (SOURCE_ENROLMENT, SOURCE_AUGMENTED)
 
+# `attendance.liveness` values — the outcome of the presentation-attack check
+# for the sighting(s) behind a row. Re-exported from config.py, which is the
+# import-cheap module engine.py can read at module scope without pulling
+# SQLAlchemy into eval/evaluate.py's import path. They live here too because
+# this is where a reader looks for the vocabulary of a column.
+#
+# 'unavailable' is the DEFAULT and the pre-existing state of the world: no
+# liveness provider was configured, so no check ran. It is not a soft failure
+# and must never be read as one — every row written before this column existed
+# means exactly this, and so does every row written on a deployment that has not
+# turned liveness on.
+from config import (  # noqa: E402  (re-exported vocabulary, not behaviour)
+    LIVENESS_ERROR,
+    LIVENESS_FAIL,
+    LIVENESS_PASS,
+    LIVENESS_STATES,
+    LIVENESS_UNAVAILABLE,
+)
+
 # `user.role` values.
 ROLE_ADMIN = "admin"    # enrol faces, delete people, export data, drive camera
 ROLE_VIEWER = "viewer"  # read attendance and nothing else
@@ -227,6 +246,25 @@ class Attendance(Base):
         Boolean, nullable=False, default=False, server_default="0"
     )
 
+    # Outcome of the presentation-attack check for this record. Same pattern as
+    # multi_template_match above: a per-row provenance flag, so "which records
+    # were verified live" is a query rather than a reconstruction from logs.
+    #
+    # In practice this column only ever holds 'unavailable' or 'pass', because a
+    # face that fails liveness is never marked present at all — there is no row
+    # to flag. 'fail' and 'error' exist in LIVENESS_STATES because the audit log
+    # and eval/liveness/ use the same vocabulary, and because a future flow that
+    # records attempts rather than only successes should not need a migration.
+    #
+    # Not sticky in the multi_template sense: 'pass' WINS and is then permanent.
+    # A verified-live sighting is a fact about the record that a later
+    # inconclusive frame does not undo, so the upsert promotes 'unavailable' to
+    # 'pass' and never demotes. See repo.upsert_attendance.
+    liveness: Mapped[str] = mapped_column(
+        String(20), nullable=False,
+        default=LIVENESS_UNAVAILABLE, server_default=LIVENESS_UNAVAILABLE,
+    )
+
     person: Mapped[Person] = relationship()
 
     __table_args__ = (
@@ -234,6 +272,10 @@ class Attendance(Base):
             "person_id", "date", "session", name="uq_attendance_person_date_session"
         ),
         Index("ix_attendance_date_session", "date", "session"),
+        CheckConstraint(
+            "liveness IN ('unavailable', 'pass', 'fail', 'error')",
+            name="ck_attendance_liveness",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -301,7 +343,7 @@ class AuditLog(Base):
     actor_username: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Short stable verbs: 'enrol', 'person.delete', 'login.failed',
-    # 'login.success', 'attendance.export', 'user.create'.
+    # 'login.success', 'attendance.export', 'user.create', 'liveness.fail'.
     action: Mapped[str] = mapped_column(String(50), nullable=False)
 
     # What was acted on, human-readable: "person:12 (Ada Lovelace)".
@@ -328,3 +370,10 @@ ACTION_ENROL = "enrol"
 ACTION_PERSON_DELETE = "person.delete"
 ACTION_EXPORT = "attendance.export"
 ACTION_USER_CREATE = "user.create"
+
+# A face was recognised but refused a mark because it failed the liveness check.
+# Written by the camera-side worker, not by a request handler, so it carries no
+# actor — the "actor" is the person in front of the lens, who by definition has
+# no account. The target string carries the attack type and confidence, because
+# a spoofing attempt nobody can characterise later is only half a record.
+ACTION_LIVENESS_FAIL = "liveness.fail"

@@ -12,6 +12,17 @@ The main goal of this project is to:
 3) Automate attendance tracking using AI & Computer Vision
 4) Maintain digital records in an organized format.
 
+> **On objective 2, as shipped: proxy attendance is *not* prevented by default.**
+> Face recognition answers "whose face is this", and an ArcFace embedding of a
+> *photograph* of someone is a perfectly good embedding of them — so out of the
+> box, holding a phone with someone's photo up to the camera marks them present.
+>
+> There is now a liveness (presentation-attack) check that closes this, but it
+> is **off unless you configure a provider**, and it has not been measured yet.
+> See [Liveness](#liveness--anti-spoofing-off-by-default) for what it costs to
+> turn on and [`eval/liveness/`](eval/liveness/) for what would have to be
+> captured before this README is allowed to claim a number.
+
 ---
 
 ## Architecture
@@ -139,6 +150,122 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."        # Windows PowerShell
 Env vars: `OLLAMA_MODEL` (default `llama3.2`), `OLLAMA_HOST` (default
 `http://localhost:11434`). The **Ask AI** panel shows which provider is active.
 
+### Liveness — anti-spoofing (OFF by default)
+
+Recognition tells you *whose face this is*. It cannot tell you whether there is
+a face there at all: an embedding of a printed photo of Ada is a good embedding
+of Ada. `backend/liveness.py` adds the second question — **is this a live person
+or a presentation attack?** — by sending the cropped face to a vision model.
+
+When it is on, a face that fails the check is **never marked present**. It is
+drawn magenta on the video feed, raised as a *Flagged attempt* card for the
+admin, and written to `audit_log` with the attack type and confidence. Every
+attendance row also carries a `liveness` column (`unavailable` / `pass`) so
+records can be separated by whether a check actually ran.
+
+**It ships inactive, and inactive means genuinely unchanged**: no check runs,
+nothing is held back, `/api/status` reports `liveness.active: false` with a
+reason, and the engine behaves exactly as it did before the feature existed.
+
+> **There is no heuristic fallback, deliberately.** The other AI feature in this
+> repo degrades to computed summaries because a worse answer is still useful.
+> Liveness has no such property — a blink-detector or texture heuristic nobody
+> measured would produce a number that *looks* like anti-spoofing and let this
+> README go on claiming protection that does not exist. With no provider, the
+> honest state is "off", and that is what it reports.
+
+#### Two ways to turn it on
+
+**Option A — Claude (sends face crops off this machine, costs money).**
+
+Both are required. The API key alone does nothing: a key may already be set for
+the Ask-AI panel, which sends attendance *text*; this sends photographs of
+people's faces, and that needs its own opt-in.
+
+```bash
+py -m pip install anthropic
+```
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."   # bash
+export LIVENESS_ENABLED=true
+```
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."   # Windows PowerShell
+$env:LIVENESS_ENABLED = "true"
+```
+
+**Cost.** One check is ~300 image tokens (a 512 px crop) + ~330 prompt + ~110
+output. A check runs on each newly-tracked face and then at most once per
+`LIVENESS_TTL_S` (default 300 s) while that face stays in view:
+
+> checks per session ≈ people × (1 + dwell_minutes ÷ 5)
+
+| `LIVENESS_MODEL` | Per check | 30-person check-in (30 checks) | 30 people seated 60 min (390 checks) |
+|---|---|---|---|
+| `claude-opus-5` *(default)* | ~$0.012 | **~$0.36** | **~$4.68** |
+| `claude-haiku-4-5` | ~$0.0012 | **~$0.036** | **~$0.47** |
+
+The 10× gap is mostly Opus 5's adaptive-thinking tokens, billed as output. Haiku
+4.5 is a sensible choice for a high-volume perception task and is what the
+Ask-AI panel already uses — but which accuracy/cost point to buy is your call,
+so the default is not quietly the cheap one:
+
+```bash
+export LIVENESS_MODEL=claude-haiku-4-5
+```
+
+Raising `LIVENESS_TTL_S` is the other cost dial, and it is also a security dial:
+a longer TTL means fewer calls, and a longer window in which a face swapped in
+after a passing check inherits that pass.
+
+**Option B — Ollama (local, nothing leaves the machine, free).**
+
+Needs no flag, because there is no egress to authorise. Must be a **vision**
+model — a text-only model accepts the request and fails on every image, so the
+probe checks the served tag list rather than just the port, and reports
+`unavailable` if the model is missing.
+
+```bash
+ollama pull llama3.2-vision
+```
+
+```bash
+export OLLAMA_VISION_MODEL=llama3.2-vision   # this is the default
+```
+
+| Model | Download | Notes |
+|---|---|---|
+| `llama3.2-vision` *(default)* | **7.82 GB** | The strongest of these on this task; slowest on CPU. |
+| `qwen2.5vl` | **5.97 GB** | |
+| `llava` | **4.73 GB** | |
+| `gemma3:4b` | **3.34 GB** | |
+| `moondream` | **1.74 GB** | Smallest. Expect the weakest attack detection. |
+
+Sizes are from the Ollama registry. All are one-time downloads to your Ollama
+model store, and none of them are measured on this task — which one is good
+enough is exactly what `eval/liveness/` is for.
+
+**Trade-off in one line:** Claude costs cents per session and sends face images
+to a third party; Ollama costs a multi-gigabyte download and some latency, and
+sends nothing anywhere.
+
+#### It has not been measured
+
+The Claude path in `backend/liveness.py` **has never made an API call**, and no
+test set exists on this machine. The suite in `backend/test_liveness.py` covers
+provider selection, JSON parsing, fail-closed behaviour, the tracked-face cache
+and enforcement — all with a stubbed provider — but nothing here establishes how
+well the check actually detects a printed photo.
+
+[`eval/liveness/README.md`](eval/liveness/README.md) says exactly what to
+capture (330 images across live / printed / phone-replay / laptop-replay, with
+the sample-size reasoning), and `eval/liveness/evaluate.py` reports detection
+rate per attack type, false-reject rate on live faces and per-decision latency,
+each with a Wilson 95% interval. Until that has been run, the claim this feature
+supports is *"a liveness check exists and can be switched on"* — not a number.
+
 ### Recognition engine — InsightFace (Python 3.14 native)
 
 The original notebooks used `face_recognition`/**dlib**, which has **no prebuilt
@@ -237,7 +364,7 @@ Every endpoint except `/` and `/api/auth/login` requires
 | POST | `/api/auth/login` | — | `{username, password}` → JWT. Rate limited. |
 | GET | `/api/auth/me` | any | the token's user and role |
 | POST | `/api/auth/users` | admin | create another account |
-| GET | `/api/status` | viewer | camera / deps / counts / calibration warning |
+| GET | `/api/status` | viewer | camera / deps / counts / calibration warning / `liveness` block |
 | POST | `/api/start`,`/api/stop` | admin | control the camera thread |
 | GET | `/video_feed` | *stream token* | MJPEG stream of the annotated webcam |
 | POST | `/api/stream_token` | viewer | single-use 60 s token for `/video_feed` |
@@ -247,6 +374,8 @@ Every endpoint except `/` and `/api/auth/login` requires
 | GET | `/api/pending` | admin | unknown faces awaiting a name |
 | POST | `/api/register` | admin | `{id, name}` → enrol. Rate limited, audited. |
 | POST | `/api/dismiss` | admin | `{id}` → drop a pending face |
+| GET | `/api/flagged` | admin | faces refused by the liveness check (empty when it is off) |
+| POST | `/api/flagged/dismiss` | admin | `{id}` → drop a flagged card (the audit row stays) |
 | POST | `/api/save` | admin | write today's CSV |
 | GET | `/api/download` | admin | download today's attendance CSV |
 | GET | `/api/audit` | admin | recent audit-log entries |

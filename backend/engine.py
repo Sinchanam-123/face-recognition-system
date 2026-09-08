@@ -40,6 +40,7 @@ Flask app can boot and serve the UI even before they're installed.
 
 import base64
 import os
+import queue
 import threading
 import time
 from datetime import datetime
@@ -51,11 +52,22 @@ from datetime import datetime
 from config import (  # noqa: F401  (re-exported for eval/evaluate.py + app.py)
     CHECKOUT_REFRESH_S,
     COLOR_PRESENT,
+    COLOR_SPOOF,
     COLOR_UNCERTAIN,
     COLOR_UNKNOWN,
     DB_PATH,
     DEFAULT_SESSION,
     DET_SIZE,
+    FLAGGED_TTL_S,
+    LIVENESS_ERROR,
+    LIVENESS_FAIL,
+    LIVENESS_PASS,
+    LIVENESS_QUEUE_MAX,
+    LIVENESS_TRACK_MEMORY_S,
+    LIVENESS_TRACK_SIM,
+    LIVENESS_TTL_S,
+    LIVENESS_UNAVAILABLE,
+    MAX_FLAGGED,
     MAX_PENDING,
     MODEL_NAME,
     PENDING_TTL_S,
@@ -67,11 +79,22 @@ from config import (  # noqa: F401  (re-exported for eval/evaluate.py + app.py)
     UNKNOWN_MEMORY_S,
     WEAK_MATCH,
 )
-
 # Decision outcomes for a single detected face.
-MATCH_PRESENT = "present"      # >= STRONG_MATCH: recorded
-MATCH_UNCERTAIN = "uncertain"  # >= WEAK_MATCH:   displayed only, NOT recorded
-MATCH_UNKNOWN = "unknown"      # below:           queued for naming
+MATCH_PRESENT = "present"      # >= STRONG_MATCH and live:   recorded
+MATCH_UNCERTAIN = "uncertain"  # >= WEAK_MATCH:              displayed only
+MATCH_UNKNOWN = "unknown"      # below:                      queued for naming
+# Recognised, but the liveness check said the camera is looking at a photograph,
+# a screen or a mask. Deliberately a THIRD failure rather than a flavour of
+# "uncertain": uncertain means the matcher was unsure who this is, and this
+# means the matcher was sure and the system refused anyway. Never recorded.
+MATCH_SPOOF = "spoof"
+# Recognised, and a liveness check is in flight. Transient, and it withholds the
+# attendance mark while it lasts — see _decide_face for why the alternative
+# (mark now, flag later) is not available to us.
+MATCH_CHECKING = "checking"
+
+# The liveness verdict of a tracked face that has been queued but not answered.
+_TRACK_PENDING = "pending"
 
 # Attendance statuses, ranked. A record may only ever move UP this ladder, which
 # is what lets a later confident sighting correct an earlier weaker one. Both
@@ -135,6 +158,37 @@ class AttendanceEngine:
         # its card is dismissed. Replaces a single global cooldown that silently
         # dropped a second, different stranger arriving in the same window.
         self._recent_unknowns = []
+
+        # ---------------------------------------------------------- liveness
+        # Tracked faces and their presentation-attack verdicts. There is no
+        # frame-to-frame tracker in this engine, so a "tracked face" is a
+        # cluster in embedding space — the same device the unknown queue uses
+        # for dedup, at a much stricter similarity (LIVENESS_TRACK_SIM), because
+        # here a false merge means one face inherits another's liveness verdict.
+        #
+        # [{id, embedding, state, result, checked_at, last_seen}]
+        self._liveness_tracks = []
+        self._liveness_seq = 0
+
+        # Camera thread -> worker thread. Bounded: a backlog of crops describes
+        # faces that have already left the frame, so dropping the oldest is
+        # better than paying to analyse them late. Depth is LIVENESS_QUEUE_MAX.
+        self._liveness_queue = queue.Queue(maxsize=LIVENESS_QUEUE_MAX)
+        self._liveness_thread = None
+        self._liveness_stop = threading.Event()
+
+        # Counters for /api/status. Cheap, and they are the only way an operator
+        # can tell "no spoofs today" from "the provider has been erroring for an
+        # hour" — both of which otherwise look like a quiet system.
+        self._liveness_counts = {
+            "checks": 0, "passed": 0, "failed": 0, "errors": 0, "dropped": 0,
+        }
+
+        # Flagged spoof attempts awaiting operator attention. Same shape as
+        # _pending, and surfaced separately in the UI because "someone held a
+        # photo up to the camera" is not "the system met a stranger".
+        self._flagged = {}
+        self._flagged_seq = 0
 
     # ----------------------------------------------------------------- gallery
     def load_gallery(self, force=False):
@@ -260,7 +314,8 @@ class AttendanceEngine:
         )
 
     # -------------------------------------------------------------- attendance
-    def _mark(self, person_id, status, confidence=None, multi_template=False):
+    def _mark(self, person_id, status, confidence=None, multi_template=False,
+              liveness=LIVENESS_UNAVAILABLE):
         """Record attendance for a person, in the database, at most once a day.
 
         The three rules this used to hold in a dict, now expressed against
@@ -333,6 +388,7 @@ class AttendanceEngine:
                     status=effective_status,
                     confidence=confidence,
                     multi_template=multi_template,
+                    liveness=liveness,
                 )
         except Exception as e:  # a database hiccup must not kill the camera loop
             with self._lock:
@@ -349,10 +405,24 @@ class AttendanceEngine:
 
     # -------------------------------------------------------------- public API
     def status(self):
+        import liveness
+
         self.load_gallery()  # cheap; lets the UI show the gallery size early
+        # Outside the lock: the provider probe may hit the network (it is cached
+        # for liveness._PROVIDER_TTL_S, but the first call after expiry is a
+        # real socket connect, and /api/status is polled every 2 s by every open
+        # dashboard).
+        liveness_status = liveness.status()
         with self._lock:
             deps_ok, deps_msg = _deps_available()
             warning = self._calibration_warning_locked()
+            liveness_status = {
+                **liveness_status,
+                "counts": dict(self._liveness_counts),
+                "flagged_count": len(self._flagged),
+                "tracked_faces": len(self._liveness_tracks),
+                "queue_depth": self._liveness_queue.qsize(),
+            }
             return {
                 "running": self._running,
                 "camera_ok": self._camera_ok,
@@ -365,8 +435,14 @@ class AttendanceEngine:
                 "identity_count": self._identity_count(),
                 "template_count": self._known_count,
                 "calibration_warning": warning,
+                # Anti-spoofing. `active` False is the default state of a fresh
+                # deployment and means no check runs at all — `reason` says why,
+                # because "off" with no explanation is how an operator ends up
+                # believing they are protected.
+                "liveness": liveness_status,
                 "attendance_count": len(self._marked),
                 "pending_count": len(self._pending),
+                "flagged_count": len(self._flagged),
                 "session": DEFAULT_SESSION,
                 "last_error": self._last_error,
             }
@@ -533,6 +609,11 @@ class AttendanceEngine:
                 # Carried into the export so a record written under an
                 # uncalibrated threshold stays identifiable outside the database.
                 "MultiTemplateMatch": r["multi_template_match"],
+                # Same reasoning: a record's anti-spoofing provenance has to
+                # survive leaving the database. 'unavailable' here means no
+                # check ran, which is the honest reading of every row exported
+                # before liveness was configured.
+                "Liveness": r["liveness"],
             }
             for r in records
         ]
@@ -542,7 +623,7 @@ class AttendanceEngine:
             rows,
             columns=[
                 "Name", "Session", "Date", "CheckIn", "CheckOut",
-                "Status", "Confidence", "MultiTemplateMatch",
+                "Status", "Confidence", "MultiTemplateMatch", "Liveness",
             ],
         ).to_csv(path, index=False)
         return filename, path
@@ -578,6 +659,11 @@ class AttendanceEngine:
     def stop(self):
         with self._lock:
             self._running = False
+        # Ask the liveness worker to wind down too. Not joined, for the same
+        # reason the camera thread is not: stop() must return promptly to the
+        # HTTP caller. The worker checks this event every 0.5 s and is a daemon,
+        # so a check already in flight finishes and is then discarded.
+        self._liveness_stop.set()
         return True, "Camera stopped."
 
     def _ensure_model(self):
@@ -722,53 +808,88 @@ class AttendanceEngine:
         row = int(sims.argmax())
         return row, int(self._template_persons[row]), float(sims[row])
 
-    def _decide_face(self, embedding):
+    def _decide_face(self, embedding, frame=None, bbox=None, cv2=None):
         """Classify one embedding and record attendance if — and only if — confident.
 
         Returns (decision, name, similarity), where decision is one of
-        MATCH_PRESENT / MATCH_UNCERTAIN / MATCH_UNKNOWN and name is None for an
-        unknown face.
+        MATCH_PRESENT / MATCH_UNCERTAIN / MATCH_UNKNOWN / MATCH_SPOOF /
+        MATCH_CHECKING and name is None for an unknown face.
 
-        The single rule that matters: **only MATCH_PRESENT writes anything.** An
-        uncertain match is drawn on the video feed and nothing else. Measured
-        open-set FAR at WEAK_MATCH is 1.335% (108 of 8090 impostor probes) — for
-        an attendance system a false accept is proxy attendance, so the band that
-        buys a lower FRR is exactly the band that must not be trusted with a
-        record. See config.WEAK_MATCH.
+        Two rules gate the write, and only a face clearing BOTH is recorded.
 
-        Split out of _recognize so the decision can be tested with synthetic
-        embeddings and no camera, model or cv2 (see backend/test_engine.py).
+        **Identity.** Only MATCH_PRESENT writes anything; an uncertain match is
+        drawn on the video feed and nothing else. Measured open-set FAR at
+        WEAK_MATCH is 1.335% (108 of 8090 impostor probes) — for an attendance
+        system a false accept is proxy attendance, so the band that buys a lower
+        FRR is exactly the band that must not be trusted with a record. See
+        config.WEAK_MATCH.
+
+        **Liveness.** A correct identity is not enough, because an ArcFace
+        embedding of a photograph of Ada is a perfectly good embedding of Ada.
+        When a liveness provider is configured, a recognised face is marked only
+        once a check has come back PASS. FAIL and ERROR both refuse the mark;
+        so, transiently, does a check still in flight.
+
+        Withholding the mark while a check is pending is the deliberate choice
+        here, and it costs one check's latency (typically 1-3 s) before a person
+        is first recorded. The alternative — mark now, correct later — is not
+        available: `repo.upsert_attendance` never overwrites `check_in` and
+        `_mark`'s cache is first-write-wins, so a mark issued before the verdict
+        arrives cannot be withdrawn when the verdict says "photograph". Fail
+        closed is the only behaviour the write path can actually honour.
+
+        `frame`/`bbox`/`cv2` are optional so the decision stays testable with
+        synthetic embeddings and no camera, model or cv2 (backend/test_engine.py
+        calls this with an embedding alone). Without a frame there is nothing to
+        crop, so the liveness gate reports UNAVAILABLE and behaviour is
+        identical to the pre-liveness engine — which is also exactly what
+        happens on every deployment that has not configured a provider.
         """
         with self._lock:
             _row, person_id, sim = self._match(embedding)
             if sim >= STRONG_MATCH:
                 name = self._person_names[person_id]
                 multi = self._person_template_counts.get(person_id, 1) > 1
-                mark_args = (person_id, "present", sim, multi)
             elif sim >= WEAK_MATCH:
                 # Displayed, deliberately NOT recorded.
                 return MATCH_UNCERTAIN, self._person_names[person_id], sim
             else:
                 return MATCH_UNKNOWN, None, sim
 
+        # Outside the lock: the gate encodes a JPEG and may touch the queue.
+        verdict = self._liveness_gate(embedding, frame, bbox, cv2, name)
+        if verdict == _TRACK_PENDING:
+            return MATCH_CHECKING, name, sim
+        if verdict in (LIVENESS_FAIL, LIVENESS_ERROR):
+            return MATCH_SPOOF, name, sim
+
         # _mark does its own locking and a database round trip; calling it from
         # inside the block above would hold the engine lock across I/O.
-        self._mark(*mark_args)
+        self._mark(person_id, "present", sim, multi, liveness=verdict)
         return MATCH_PRESENT, name, sim
 
     def _recognize(self, frame, cv2):
         """Detect + identify every face; return a list of (bbox, label, color)."""
+        now = time.time()
         with self._lock:
-            self._prune_pending(time.time())
+            self._prune_pending(now)
+            self._prune_liveness(now)
 
         out = []
         for face in self._app.get(frame):
             emb = face.normed_embedding
             bbox = tuple(int(v) for v in face.bbox)
-            decision, name, sim = self._decide_face(emb)
+            decision, name, sim = self._decide_face(emb, frame, bbox, cv2)
 
             if decision == MATCH_PRESENT:
                 out.append((bbox, name, COLOR_PRESENT))
+            elif decision == MATCH_CHECKING:
+                out.append((bbox, f"{name} (checking)", COLOR_UNCERTAIN))
+            elif decision == MATCH_SPOOF:
+                # The label names the person the matcher believed it saw,
+                # because "SPOOF?" alone tells the operator nothing about whose
+                # attendance somebody was trying to claim.
+                out.append((bbox, f"SPOOF? {name}", COLOR_SPOOF))
             elif decision == MATCH_UNCERTAIN:
                 # "?" as well as the colour: the label has to read as "not
                 # recorded" on a monochrome screenshot too.
@@ -777,6 +898,284 @@ class AttendanceEngine:
                 self._queue_unknown(emb, frame, bbox, sim, cv2)
                 out.append((bbox, "Unknown", COLOR_UNKNOWN))
         return out
+
+    # ---------------------------------------------------------------- liveness
+    def _prune_liveness(self, now):
+        """Forget stale tracks and flagged cards. Caller must hold the lock."""
+        if self._liveness_tracks:
+            self._liveness_tracks = [
+                t for t in self._liveness_tracks
+                if now - t["last_seen"] <= LIVENESS_TRACK_MEMORY_S
+            ]
+        for key in [k for k, f in self._flagged.items()
+                    if now - f["at"] > FLAGGED_TTL_S]:
+            self._flagged.pop(key, None)
+
+    def _find_track_locked(self, embedding, np):
+        """The tracked face this embedding belongs to, or None. Holds the lock.
+
+        Nearest cluster above LIVENESS_TRACK_SIM, not merely the first one over
+        the line: two enrolled people can both clear a similarity floor against
+        a middling embedding, and inheriting the *closer* one's verdict is the
+        only defensible choice when that verdict decides whether someone is
+        marked present.
+        """
+        best, best_sim = None, LIVENESS_TRACK_SIM
+        for track in self._liveness_tracks:
+            sim = float(np.dot(track["embedding"], embedding))
+            if sim >= best_sim:
+                best, best_sim = track, sim
+        return best
+
+    def _liveness_gate(self, embedding, frame, bbox, cv2, name):
+        """The liveness verdict for this face: a LIVENESS_* value or _TRACK_PENDING.
+
+        Returns LIVENESS_UNAVAILABLE — the value that lets the mark through
+        unchanged — whenever no check can run: no provider configured, or no
+        frame to crop. That is the pre-liveness behaviour, reached by the same
+        code path rather than by a separate branch, so "liveness is off" cannot
+        drift away from "liveness never existed".
+        """
+        import liveness
+
+        if not liveness.is_active():
+            return LIVENESS_UNAVAILABLE
+        if frame is None or bbox is None or cv2 is None:
+            return LIVENESS_UNAVAILABLE
+
+        import numpy as np
+
+        now = time.time()
+        with self._lock:
+            track = self._find_track_locked(embedding, np)
+            if track is not None:
+                track["last_seen"] = now
+                fresh = now - track["checked_at"] < LIVENESS_TTL_S
+                if track["state"] != _TRACK_PENDING and fresh:
+                    return track["state"]
+                if track["rechecking"]:
+                    # A check is already in flight for this face. Serve the
+                    # previous verdict if there is one; PENDING only while the
+                    # very first check is outstanding.
+                    return track["state"]
+                # Stale, and nothing in flight: queue a re-check but KEEP
+                # serving the old verdict. Reverting to PENDING here would
+                # un-mark a person the system has already recorded, once every
+                # TTL, on no new evidence.
+                track["rechecking"] = True
+                track_id = track["id"]
+                serve = track["state"]
+                is_new = False
+            else:
+                self._liveness_seq += 1
+                track_id = self._liveness_seq
+                self._liveness_tracks.append({
+                    "id": track_id,
+                    "embedding": np.array(embedding, dtype=np.float32, copy=True),
+                    "state": _TRACK_PENDING,
+                    "result": None,
+                    "checked_at": 0.0,
+                    "last_seen": now,
+                    "rechecking": True,
+                })
+                serve = _TRACK_PENDING
+                is_new = True
+
+        # --- outside the lock -------------------------------------------------
+        # Cropping and JPEG-encoding is milliseconds of CPU, but the rule in this
+        # engine is that the mutex is never held across encode or I/O.
+        jpeg = liveness.crop_for_liveness(frame, bbox)
+        if jpeg is None:
+            # No usable crop is an inconclusive check, and inconclusive fails
+            # closed — but only for a face that has no verdict yet. A tracked
+            # face that already passed keeps its verdict; one bad frame is not
+            # evidence against it.
+            with self._lock:
+                if is_new:
+                    self._finish_track_locked(
+                        track_id, LIVENESS_ERROR, None, now)
+                    return LIVENESS_ERROR
+                self._clear_recheck_locked(track_id)
+            return serve
+
+        self._ensure_liveness_worker()
+        try:
+            self._liveness_queue.put_nowait((track_id, jpeg, name))
+        except queue.Full:
+            # The worker is behind. Drop the request rather than block the
+            # camera thread; the face is re-queued on a later frame if it is
+            # still there, and the counter makes the backpressure visible.
+            with self._lock:
+                self._liveness_counts["dropped"] += 1
+                if is_new:
+                    # Nothing was ever checked for this face — forget it
+                    # entirely so the next frame starts cleanly rather than
+                    # finding a track stuck at PENDING with nothing in flight.
+                    self._drop_track_locked(track_id)
+                else:
+                    self._clear_recheck_locked(track_id)
+            return serve
+        return serve
+
+    def _drop_track_locked(self, track_id):
+        """Remove a track that never got queued. Caller holds the lock."""
+        self._liveness_tracks = [
+            t for t in self._liveness_tracks if t["id"] != track_id
+        ]
+
+    def _clear_recheck_locked(self, track_id):
+        """Mark a re-check as no longer in flight, leaving the verdict alone.
+
+        Without this, a re-check that failed to queue would leave `rechecking`
+        set forever and the face would never be re-examined again.
+        """
+        for track in self._liveness_tracks:
+            if track["id"] == track_id:
+                track["rechecking"] = False
+                return
+
+    def _finish_track_locked(self, track_id, state, result, now):
+        """Write a verdict onto a track. Caller holds the lock."""
+        for track in self._liveness_tracks:
+            if track["id"] == track_id:
+                track["state"] = state
+                track["result"] = result
+                track["checked_at"] = now
+                track["rechecking"] = False
+                return True
+        return False
+
+    def _ensure_liveness_worker(self):
+        """Start the worker thread if it is not already running."""
+        with self._lock:
+            if self._liveness_thread is not None and self._liveness_thread.is_alive():
+                return
+            self._liveness_stop.clear()
+            self._liveness_thread = threading.Thread(
+                target=self._liveness_worker,
+                name="liveness-worker",
+                daemon=True,
+            )
+            self._liveness_thread.start()
+
+    def _liveness_worker(self):
+        """Drain the queue, calling the provider off the camera thread.
+
+        This thread exists for one reason: `liveness.check` blocks on a network
+        round trip for up to LIVENESS_TIMEOUT_S, and the camera thread must
+        never wait on it. Recognition and the MJPEG stream keep running at full
+        rate while a check is outstanding; the only thing that waits is the
+        attendance mark for that particular face.
+        """
+        import liveness
+
+        while not self._liveness_stop.is_set():
+            try:
+                track_id, jpeg, name = self._liveness_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            try:
+                result = liveness.check(jpeg)
+            except Exception as e:
+                # `liveness.check` is documented never to raise, but this thread
+                # must outlive a bug in it — a dead worker would leave every
+                # face permanently PENDING, i.e. silently stop all attendance.
+                with self._lock:
+                    self._last_error = f"Liveness worker error: {e}"
+                    self._finish_track_locked(
+                        track_id, LIVENESS_ERROR, None, time.time())
+                continue
+            finally:
+                self._liveness_queue.task_done()
+
+            now = time.time()
+            with self._lock:
+                self._liveness_counts["checks"] += 1
+                if result.state == LIVENESS_PASS:
+                    self._liveness_counts["passed"] += 1
+                elif result.state == LIVENESS_FAIL:
+                    self._liveness_counts["failed"] += 1
+                else:
+                    self._liveness_counts["errors"] += 1
+                    self._last_error = f"Liveness check failed: {result.reasoning}"
+                self._finish_track_locked(track_id, result.state, result, now)
+
+            if result.state != LIVENESS_PASS:
+                self._record_liveness_failure(jpeg, name, result, now)
+
+    def _record_liveness_failure(self, jpeg, name, result, now):
+        """Flag a refused face for the operator and write it to the audit log.
+
+        Both halves matter and they serve different readers. The flagged card is
+        for the person watching the screen right now — someone is at the camera
+        holding a photograph. The audit row is for whoever asks next month why a
+        given day looks odd; it is append-only and outlives the card's TTL.
+
+        ERROR is recorded as well as FAIL. A provider that has been failing all
+        morning is not a quiet system, and an audit log that only records
+        confident refusals cannot tell those two apart. Volume is bounded by the
+        per-track TTL, not by frame rate.
+        """
+        import db
+        import repo
+        from models import ACTION_LIVENESS_FAIL
+
+        with self._lock:
+            if len(self._flagged) < MAX_FLAGGED:
+                self._flagged_seq += 1
+                self._flagged[self._flagged_seq] = {
+                    "id": self._flagged_seq,
+                    "thumb": base64.b64encode(jpeg).decode("ascii"),
+                    "name": name,
+                    "state": result.state,
+                    "attack_type": result.attack_type,
+                    "confidence": round(result.confidence, 3),
+                    "reasoning": result.reasoning,
+                    "provider": result.provider,
+                    "at": now,
+                }
+
+        target = (
+            f"person:{name} attack={result.attack_type} "
+            f"confidence={result.confidence:.2f} state={result.state}"
+        )
+        try:
+            with db.session_scope() as session:
+                repo.audit(
+                    session,
+                    action=ACTION_LIVENESS_FAIL,
+                    # No actor: the subject of this row is the person in front
+                    # of the lens, who has no account by construction.
+                    actor_user_id=None,
+                    actor_username=None,
+                    target=target[:255],
+                    ip=None,
+                )
+        except Exception as e:  # auditing must not kill the worker
+            with self._lock:
+                self._last_error = f"Liveness audit write failed: {e}"
+
+    def flagged(self):
+        """Spoof attempts awaiting operator attention, newest last."""
+        with self._lock:
+            self._prune_liveness(time.time())
+            return [
+                {k: v for k, v in entry.items() if k != "at"}
+                for entry in self._flagged.values()
+            ]
+
+    def dismiss_flagged(self, flagged_id):
+        """Drop one flagged card. The audit row it came from stays forever."""
+        try:
+            key = int(flagged_id)
+        except (TypeError, ValueError):
+            return False, "No such flagged attempt."
+        with self._lock:
+            existed = self._flagged.pop(key, None) is not None
+        if not existed:
+            return False, "No such flagged attempt."
+        return True, "Dismissed."
 
     # ------------------------------------------------------------ unknown queue
     def _prune_pending(self, now):

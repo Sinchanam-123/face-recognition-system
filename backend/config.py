@@ -123,6 +123,103 @@ PENDING_TTL_S = 60.0
 # embedding is jittery enough to slip past the dedup check every frame.
 MAX_PENDING = 25
 
+# --------------------------------------------------------------------- liveness
+# Presentation-attack detection. See backend/liveness.py for why there is no
+# heuristic fallback and why activation needs an explicit env flag.
+
+# The outcome vocabulary. Defined HERE rather than in models.py, even though
+# `attendance.liveness` is a database column, because engine.py needs these at
+# module scope and models.py drags in SQLAlchemy. engine.py is imported by
+# eval/evaluate.py purely to read thresholds off the running app, and that
+# import must stay as cheap as it is today. models.py re-exports them so schema
+# readers still find them where they would expect to.
+#
+# 'unavailable' is the DEFAULT and describes the pre-existing world: no provider
+# configured, so no check was attempted. It is not a soft failure and must never
+# be read as one.
+LIVENESS_UNAVAILABLE = "unavailable"  # no provider; no check attempted
+LIVENESS_PASS = "pass"                # a check ran and saw a live person
+LIVENESS_FAIL = "fail"                # a check ran and saw a presentation attack
+LIVENESS_ERROR = "error"              # a check ran and could not decide
+LIVENESS_STATES = (
+    LIVENESS_UNAVAILABLE, LIVENESS_PASS, LIVENESS_FAIL, LIVENESS_ERROR,
+)
+#
+# NONE of these values are measured. Every threshold above this point cites the
+# eval run that produced it; these are engineering defaults chosen from first
+# principles, and they are marked as such rather than dressed up. eval/liveness/
+# exists to replace the guesses with numbers once a test set has been captured.
+
+# How long one tracked face's verdict is reused before it is re-checked.
+#
+# This is the cost dial and the security dial at once, and they pull in opposite
+# directions. Long TTL: fewer API calls, but a spoof swapped in after a live
+# check inherits the pass for up to this long. Short TTL: the reverse.
+#
+# 300 s is chosen for the attendance use case rather than for security in
+# general: a person is marked present once per day, so the check that matters is
+# the FIRST one, and re-checks exist to catch a substitution during a long
+# session. At 300 s a 30-person hour-long class costs 30 x (1 + 60/5) = 390
+# calls. Lower it if faces are marked more often than once a session.
+LIVENESS_TTL_S = 300.0
+
+# Two detections are the same tracked face when their embeddings are at least
+# this similar. Higher than UNKNOWN_DEDUP (0.35) on purpose: that value only has
+# to avoid merging two strangers into one queue card, whereas this one decides
+# whether a face inherits somebody else's liveness verdict. Getting it wrong in
+# the permissive direction lets an attacker inherit a real person's pass, so it
+# sits near the measured genuine-pair mean (0.616) rather than near the impostor
+# range (0.011 +/- 0.069).
+LIVENESS_TRACK_SIM = 0.55
+
+# How long a tracked face is remembered after it was last seen. Covers someone
+# turning away and back without paying for a fresh check, while bounding the
+# window in which a substitution inherits a verdict.
+LIVENESS_TRACK_MEMORY_S = 60.0
+
+# Face crop sent to the model. The margin keeps context AROUND the detection —
+# a tight crop would cut off the phone bezel or paper edge that gives an attack
+# away, which is the single most useful cue in the frame.
+LIVENESS_CROP_MARGIN = 0.35
+
+# Longest side of the crop, in pixels, after downscaling. Drives both cost and
+# capability: Anthropic bills roughly (w x h) / 750 tokens, so 512 is about 350
+# image tokens. Below ~320 the fine texture cues (moire, print dither, skin
+# micro-texture) stop being resolvable and the check degrades to guessing at
+# geometry.
+LIVENESS_CROP_MAX_PX = 512
+
+# JPEG quality for that crop. 85 rather than 95 because the difference is
+# invisible to the model and visible on the wire; rather than 70 because
+# compression artefacts are themselves one of the textures being judged, and
+# over-compressing manufactures the evidence.
+LIVENESS_JPEG_QUALITY = 85
+
+# Response cap. The contract is four short fields; anything longer is a model
+# ignoring the schema, and paying for it does not help.
+LIVENESS_MAX_TOKENS = 300
+
+# Per-call network timeout. Generous enough for a cold vision model on Ollama,
+# short enough that a hung provider does not pin a worker. A timeout fails
+# closed, so this bounds how long a genuine person waits to be marked, not how
+# long an attacker gets through.
+LIVENESS_TIMEOUT_S = 20.0
+
+# Bound on the work queue between the camera thread and the liveness worker.
+# Small on purpose: if checks cannot keep up, the useful thing to drop is the
+# oldest request, because by the time a backlog clears the face it describes has
+# usually left the frame. A large queue would spend money on stale crops.
+LIVENESS_QUEUE_MAX = 8
+
+# Flagged-attempt cards for the operator, mirroring the unknown-face queue.
+FLAGGED_TTL_S = 300.0
+MAX_FLAGGED = 25
+
+# Annotation colour for a face that failed liveness, BGR. Magenta, deliberately
+# unlike COLOR_UNCERTAIN (orange) and COLOR_UNKNOWN (red): a spoof is not a weak
+# match and not a stranger, it is an attempt, and the feed has to say so.
+COLOR_SPOOF = (255, 0, 255)
+
 # -------------------------------------------------------------------- attendance
 # The `session` half of the attendance unique key (person_id, date, session).
 # One value means one attendance row per person per day, which is exactly the

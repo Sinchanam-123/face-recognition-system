@@ -336,3 +336,134 @@ body {
 }
 .ai-answer .ai-q { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .ai-answer p { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; }
+
+/* ==========================================================================
+   Authentication — login screen, role tag, sign-out
+   ========================================================================== */
+
+.login-shell {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.login-card {
+  width: 100%; max-width: 380px;
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 30px 28px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--border); border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+}
+.login-brand { display: flex; align-items: center; gap: 13px; margin-bottom: 4px; }
+.login-brand h1 { font-size: 19px; margin: 0; }
+.login-field { display: flex; flex-direction: column; gap: 7px; }
+.login-field span {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.07em;
+}
+.login-field input {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 9px;
+  color: var(--text); padding: 10px 12px; font-size: 14px; outline: none;
+}
+.login-field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow); }
+.login-submit { width: 100%; justify-content: center; margin-top: 4px; }
+.login-error {
+  background: #2a1414; border: 1px solid #5b1e1e; color: #f6a0a0;
+  border-radius: 9px; padding: 10px 12px; font-size: 13px;
+}
+.login-hint { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin: 2px 0 0; }
+.login-hint code {
+  background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 5px;
+  font-size: 11px;
+}
+
+.topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.role-tag {
+  font-size: 11px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted);
+  text-transform: lowercase; letter-spacing: 0.02em;
+}
+.role-tag.role-admin {
+  color: var(--accent-2); border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* ==========================================================================
+   Threshold calibration warning
+   --------------------------------------------------------------------------
+   Deliberately the loudest banner in the app, and deliberately not a toast.
+   STRONG_MATCH = 0.370 was derived at one face template per person; the moment
+   anyone holds two, every attendance decision is being made at a threshold
+   nothing has measured. It stays on screen until the threshold is re-derived
+   in eval/.
+   ========================================================================== */
+
+.banner.calib {
+  background: #2b1d0b; border-color: #7a5310; color: #ffd899;
+  line-height: 1.65;
+}
+.banner.calib strong { color: #ffb84d; display: block; margin-bottom: 3px; }
+
+/* Per-row marker: this record was written while the matched person had more
+   than one template, i.e. under an uncalibrated threshold. */
+.uncal-flag {
+  margin-left: 8px; font-size: 9.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 2px 6px; border-radius: 5px;
+  background: color-mix(in srgb, var(--uncertain) 18%, transparent);
+  color: var(--uncertain);
+  border: 1px solid color-mix(in srgb, var(--uncertain) 38%, transparent);
+  cursor: help;
+}
+
+/* Warns before the click that typing an existing name adds a second template
+   to that person rather than creating a new one. */
+.card-note {
+  font-size: 10.5px; color: var(--muted); line-height: 1.5;
+  margin: 6px 0 0;
+}
+
+/* ---------------------------------------------------------------- liveness
+   Flagged presentation attacks. Magenta throughout, matching
+   config.COLOR_SPOOF on the video feed — the operator sees the same colour on
+   the face in the stream and on the card it produced. Deliberately not the
+   --unknown red (a stranger) or --uncertain amber (a weak match): a spoof is a
+   third thing, and reusing either colour would merge it into one of them. */
+:root { --spoof: #e155d6; }
+
+.head-ic.spoof { --head-tone: var(--spoof); }
+
+.card.flagged {
+  border-color: color-mix(in srgb, var(--spoof) 45%, var(--border));
+  background: color-mix(in srgb, var(--spoof) 6%, var(--panel-2));
+}
+/* An inconclusive check refused the mark without seeing an attack. Muted so it
+   does not read as an accusation the model did not make. */
+.card.flagged.inconclusive {
+  border-color: color-mix(in srgb, var(--uncertain) 40%, var(--border));
+  background: color-mix(in srgb, var(--uncertain) 5%, var(--panel-2));
+}
+
+.spoof-badge {
+  position: absolute; right: 6px; bottom: 6px;
+  min-width: 34px; padding: 2px 6px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; text-align: center;
+  background: var(--spoof); color: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+}
+.card.flagged.inconclusive .spoof-badge { background: var(--uncertain); color: #241a00; }
+
+.flagged-title {
+  font-weight: 700; font-size: 13px; color: var(--spoof); letter-spacing: .2px;
+}
+.card.flagged.inconclusive .flagged-title { color: var(--uncertain); }
+
+.flagged-attack { font-size: 13px; margin-top: 2px; }
+
+.flagged-claim { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+/* One line, ellipsised. The full sentence is in the title attribute — a model's
+   reasoning is useful on hover and noise when it reflows every card. */
+.flagged-reason {
+  font-size: 11px; color: var(--muted); margin-top: 6px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

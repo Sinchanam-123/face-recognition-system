@@ -18,12 +18,14 @@ from datetime import date as date_type
 from datetime import datetime
 from typing import NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from models import (
     ACTION_ENROL,
+    LIVENESS_PASS,
+    LIVENESS_UNAVAILABLE,
     SOURCE_ENROLMENT,
     Attendance,
     AuditLog,
@@ -196,6 +198,7 @@ def upsert_attendance(
     status: str,
     confidence: float | None,
     multi_template: bool,
+    liveness: str = LIVENESS_UNAVAILABLE,
 ) -> int:
     """Create or update the row for (person, day, session). Returns its id.
 
@@ -214,10 +217,27 @@ def upsert_attendance(
       * **confidence only rises**, so the column means "best we saw", not
         "whatever the last frame happened to score".
 
-    Plus one new rule: **multi_template_match is sticky**. Once a row has been
-    touched by a match against a person with several templates, it stays
-    flagged — a later single-template match does not clear the fact that this
-    record was partly written under an uncalibrated threshold.
+    Plus two provenance rules that work in opposite directions, deliberately:
+
+    * **multi_template_match is sticky.** Once a row has been touched by a match
+      against a person with several templates, it stays flagged — a later
+      single-template match does not clear the fact that this record was partly
+      written under an uncalibrated threshold. The pessimistic value wins,
+      because the flag records a *doubt*.
+    * **liveness promotes to 'pass' and never demotes.** A sighting that a
+      liveness provider confirmed was a live human is a fact about this record;
+      a later frame checked while the provider was unreachable does not undo it.
+      The optimistic value wins, because the flag records a *verification*.
+
+    Getting those two the same way round would be wrong in both cases: a sticky
+    liveness would let one transient provider outage permanently mark a verified
+    record unverified, and a promoting multi_template flag would erase the
+    calibration doubt the moment a template was deleted.
+
+    Note that 'fail' never reaches this method. A face that fails liveness is
+    not marked present at all, so there is no row to write — see
+    engine._decide_face. The value is in LIVENESS_STATES for the audit log and
+    the eval harness, which speak the same vocabulary.
 
     Status upgrades are handled by the caller (engine._STATUS_RANK); by the time
     a call reaches here the status is the one that should win.
@@ -232,6 +252,7 @@ def upsert_attendance(
         "confidence": confidence,
         "status": status,
         "multi_template_match": multi_template,
+        "liveness": liveness,
     }
 
     if dialect == "sqlite":
@@ -248,6 +269,11 @@ def upsert_attendance(
                 "status": stmt.excluded.status,
                 "multi_template_match": (
                     Attendance.multi_template_match | stmt.excluded.multi_template_match
+                ),
+                # Promote to 'pass', never demote from it.
+                "liveness": case(
+                    (stmt.excluded.liveness == LIVENESS_PASS, LIVENESS_PASS),
+                    else_=Attendance.liveness,
                 ),
             },
         ).returning(Attendance.id)
@@ -271,6 +297,8 @@ def upsert_attendance(
         existing.confidence = max(existing.confidence or -1.0, confidence)
     existing.status = status
     existing.multi_template_match = existing.multi_template_match or multi_template
+    if liveness == LIVENESS_PASS:
+        existing.liveness = LIVENESS_PASS
     session.flush()
     return int(existing.id)
 
@@ -313,6 +341,7 @@ def attendance_for_day(
                     round(row.confidence, 3) if row.confidence is not None else None
                 ),
                 "multi_template_match": bool(row.multi_template_match),
+                "liveness": row.liveness,
             }
         )
     return out
