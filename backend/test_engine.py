@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np  # noqa: E402
 
 import config  # noqa: E402
+from config import LIVENESS_UNAVAILABLE  # noqa: E402
 from engine import (  # noqa: E402
     MATCH_PRESENT,
     MATCH_UNCERTAIN,
@@ -69,16 +70,23 @@ def axis(index, dim=512):
 def stub_marks(eng):
     """Replace `_mark` with a recorder, so no database is touched."""
     eng.marked = []
-    eng._mark = lambda person_id, status, confidence=None, multi_template=False: (
+
+    def record(person_id, status, confidence=None, multi_template=False,
+               liveness=LIVENESS_UNAVAILABLE):
         eng.marked.append(
             {
                 "person_id": person_id,
                 "status": status,
                 "confidence": confidence,
                 "multi_template": multi_template,
+                # 'unavailable' is what every mark carries with no liveness
+                # provider configured, which is the state these tests run in —
+                # they pass an embedding and no frame, so no check can happen.
+                "liveness": liveness,
             }
         )
-    )
+
+    eng._mark = record
     return eng
 
 

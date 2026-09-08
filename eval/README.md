@@ -284,10 +284,16 @@ model of any particular camera.
 ## Why the numbers transfer
 
 `evaluate.py` imports `MODEL_NAME`, `DET_SIZE`, `STRONG_MATCH` and
-`WEAK_MATCH` directly from `backend/engine.py` rather than restating them, so
-the harness cannot silently drift from the running app. If you change a
-threshold in the backend, re-running this reports the new operating point with
-no edits here.
+`WEAK_MATCH` directly from `backend/engine.py` — which re-exports them from
+`backend/config.py`, where each carries the eval run that justifies it — rather
+than restating them, so the harness cannot silently drift from the running app.
+If you change a threshold in the backend, re-running this reports the new
+operating point with no edits here.
+
+That pinning is bidirectional and has been exercised: `STRONG_MATCH` moved from
+0.50 to 0.370 on the strength of these curves, and re-running the harness
+afterwards updated every `at_backend_strong_match` row automatically. Archive
+the superseding run first — see [`results/history/`](results/history/).
 
 Embeddings are produced exactly as the app produces them: the same InsightFace
 pack, same `det_size`, same `normed_embedding`. Matching is the same cosine
@@ -659,6 +665,20 @@ Results land in `eval/results/`.
 Everything below, plus the seed, the full config, the resolved backend
 settings, environment versions, and the embedding cache key.
 
+It is a **live report of the app as it currently stands**, not a record: the
+`backend_settings` and `at_backend_*` rows read `backend/config.py` at run time,
+so re-running after a threshold change overwrites the numbers that justified
+that change. Runs which motivated a backend change are therefore archived under
+[`results/history/`](results/history/) before being superseded — see the README
+there. `metrics_2026-09-05_backend-0.50-0.32.json` is the run `config.py` cites.
+
+Re-baselining is cheap and safe because the embedding cache key covers the
+model, detector settings and dataset but deliberately **not** the thresholds: a
+threshold changes how scores are read, never what they are. Re-running after a
+threshold change reuses both caches and touches only the rows that quote the
+live constants. If a cache key differs between two runs you are comparing, they
+are not a before/after pair — something changed the embeddings.
+
 ### `openset_far_frr_mir.png` — **the plot that sets the threshold**
 
 Three stacked panels — FAR, FRR and misidentification rate against threshold —
@@ -904,31 +924,48 @@ Two things the sweep shows that are worth not mis-reading:
   reasons at once. `metrics.json` carries this as
   `note_frr_across_gallery_sizes`.
 
-### The complete threshold comparison (gap 2)
+### The threshold change: before and after (gap 2)
 
 Open-set terms throughout — clean arm, 1 enrolment image, gallery 50. FRR and
 misidentification are measured under *this* protocol, not carried over from the
 retired verification run.
 
-| Threshold | Open-set FAR | FRR | MISID | Verdict |
-|---|---|---|---|---|
-| 0.271 (verification's answer for FAR ≤ 0.1%) | **4.957%** (401/8090) | 0.11% | 0.02% | 50× its FAR budget. The verification ROC cannot set this threshold. |
-| 0.32 (`WEAK_MATCH`) | **1.335%** (108/8090) | 0.36% | 0.02% | One stranger frame in 75 accepted. Dangerous. |
-| **0.370 (recommended)** | **0.099%** (8/8090) | **1.27%** | 0.02% | Meets the budget at the cost the FRR column states. |
-| 0.50 (`STRONG_MATCH`) | 0.000% (0/8090) | **9.88%** | 0.02% | Safe on FAR, rejects one in ten genuine frames. |
+`backend/config.py` now sets `STRONG_MATCH = 0.370`. What that changed:
 
-So the cost of the existing pair, stated properly:
+| | Threshold | Open-set FAR | FRR | MISID | Marks attendance? |
+|---|---|---|---|---|---|
+| **Before** | `STRONG_MATCH` 0.50 | 0.000% (0/8090) | **9.88%** | 0.02% | yes |
+| | `WEAK_MATCH` 0.32 | **1.335%** (108/8090) | 0.36% | 0.02% | **yes** — the bug |
+| **After** | `STRONG_MATCH` **0.370** | **0.087%** (7/8090) | **1.32%** | 0.02% | yes |
+| | `WEAK_MATCH` 0.32 | 1.335% (108/8090) | 0.36% | 0.02% | **no** — display only |
 
-* **`WEAK_MATCH = 0.32` accepts 1.34% of stranger frames.** With recognition
-  running every third frame and `_mark()` first-write-wins, a stranger in view
-  for a few seconds is very likely to be marked present as somebody else. This
-  is the setting to change.
-* **`STRONG_MATCH = 0.50` rejects 9.88% of genuine frames** to buy a FAR
-  improvement of 0.099 pp over 0.370. On this data it is over-strict by a wide
-  margin.
-* A single threshold at **0.370** is simultaneously safer than 0.32 (13× less
-  FAR) and far less strict than 0.50 (7.8× less FRR). The `uncertain` band
-  between them is not buying anything these numbers can see.
+Two separate corrections, and the second matters more than the first:
+
+* **`STRONG_MATCH` 0.50 → 0.370 cut the false-reject rate from 9.88% to 1.32%**
+  — a 7.5× reduction — for 0.087 pp of extra FAR. 0.50 was rejecting roughly
+  one genuine frame in ten to buy a FAR improvement the measurement cannot even
+  resolve (0 vs 7 impostor probes out of 8090).
+* **`WEAK_MATCH` 0.32 no longer writes an attendance record.** Its FAR is
+  unchanged at 1.335% — about one stranger frame in 75 — and that was being
+  written straight into the register. With recognition running every third
+  frame and `_mark()` previously first-write-wins, a stranger in view for a
+  couple of seconds was very likely to be marked present as somebody else. The
+  band is still drawn on the video feed in its own colour, because "the system
+  nearly recognised someone" is useful to an operator; it is simply no longer
+  evidence of attendance.
+
+The `uncertain` band was never buying anything these numbers can see. What it
+cost was the ability to trust the register.
+
+#### Why the after row is 0.087% / 1.32% and not 0.099% / 1.27%
+
+The recommended threshold is the grid point `0.3699702`; the deployed constant
+is the rounded `0.370`. Rounding *up* makes it fractionally stricter — one
+fewer false accept (7 rather than 8 of 8090) at 0.05 pp more FRR. Both sit well
+inside each other's confidence intervals, so the difference is bookkeeping, not
+a finding. The table reports the constant the app actually runs rather than the
+idealised grid point, which is the whole reason the harness reads the threshold
+out of `backend/config.py` instead of restating it.
 
 ### The augmentation target (gap 3)
 
